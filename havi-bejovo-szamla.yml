@@ -1,0 +1,43 @@
+name: Havi bejövő számla szinkron
+
+# Mikor fusson:
+on:
+  schedule:
+    # Minden hónap 1-jén 05:00 UTC (kb. 06:00–07:00 magyar idő).
+    - cron: "0 5 1 * *"
+  workflow_dispatch:
+    # Kézi indítás ("ha kérem") — az Actions fülön a "Run workflow" gombbal.
+    inputs:
+      honap:
+        description: 'Melyik hónap? (üresen = előző hónap; pl. 2026-05)'
+        required: false
+        default: ''
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repo letöltése
+        uses: actions/checkout@v4
+
+      - name: Node beállítása
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Függőségek és build (NAV MCP szerver)
+        run: |
+          npm ci
+          npm run build
+
+      - name: Bejövő számlák lekérése és Sheetbe írása
+        env:
+          NAV_LOGIN:         ${{ secrets.NAV_LOGIN }}
+          NAV_PASSWORD:      ${{ secrets.NAV_PASSWORD }}
+          NAV_TAX_NUMBER:    ${{ secrets.NAV_TAX_NUMBER }}
+          NAV_SIGNATURE_KEY: ${{ secrets.NAV_SIGNATURE_KEY }}
+          NAV_EXCHANGE_KEY:  ${{ secrets.NAV_EXCHANGE_KEY }}
+          NAV_ENV:           production
+          SHEET_URL:         ${{ secrets.SHEET_URL }}
+          HONAP:             ${{ github.event.inputs.honap }}
+        run: node scripts/havi-bejovo-sync.mjs
