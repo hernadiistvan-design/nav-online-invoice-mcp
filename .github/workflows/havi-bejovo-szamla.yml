@@ -1,18 +1,9 @@
-name: Havi bejövő számla szinkron
+name: NAV bejövő számla szinkron
 
 on:
   schedule:
     - cron: "0 5 1 * *"
   workflow_dispatch:
-    inputs:
-      honap:
-        description: 'Melyik hónap? (üresen = előző hónap; pl. 2026-05)'
-        required: false
-        default: ''
-      direction:
-        description: 'Irány: INBOUND (bejövő) vagy OUTBOUND (kiállított)'
-        required: false
-        default: 'INBOUND'
 
 jobs:
   sync:
@@ -32,6 +23,4 @@ jobs:
           NAV_EXCHANGE_KEY:  ${{ secrets.NAV_EXCHANGE_KEY }}
           NAV_ENV:           production
           SHEET_URL:         ${{ secrets.SHEET_URL }}
-          HONAP:             ${{ github.event.inputs.honap }}
-          DIRECTION:         ${{ github.event.inputs.direction || 'INBOUND' }}
         run: node havi-bejovo-sync.js
