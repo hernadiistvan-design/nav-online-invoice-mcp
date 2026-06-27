@@ -8,18 +8,26 @@ const DIRECTION = (process.env.DIRECTION || "INBOUND").trim().toUpperCase();
 function getRange() {
   if (/^\d{4}-\d{2}$/.test(HONAP)) {
     const [y,m] = HONAP.split("-").map(Number);
-    return { dateFrom:`${y}-${String(m).padStart(2,'0')}-01`, dateTo:`${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}`, label:HONAP };
+    return {
+      dateFrom: `${y}-${String(m).padStart(2,'0')}-01`,
+      dateTo:   `${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}`,
+      label: HONAP
+    };
   }
   const n = new Date();
   let y = n.getUTCFullYear(), m = n.getUTCMonth();
-  if(m===0){m=12;y--;}
-  return { dateFrom:`${y}-${String(m).padStart(2,'0')}-01`, dateTo:`${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}`, label:`${y}-${String(m).padStart(2,'0')}` };
+  if (m===0){m=12;y--;}
+  return {
+    dateFrom: `${y}-${String(m).padStart(2,'0')}-01`,
+    dateTo:   `${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}`,
+    label: `${y}-${String(m).padStart(2,'0')}`
+  };
 }
 
 function parseRaw(res) {
   const txt = (res?.content||[]).filter(c=>c.type==="text").map(c=>c.text).join("\n").trim();
-  const jsonMatch = txt.match(/```json\n([\s\S]*?)\n```/);
-  if (jsonMatch) { try { return JSON.parse(jsonMatch[1]); } catch(e) {} }
+  const jm = txt.match(/```json\n([\s\S]*?)\n```/);
+  if (jm) { try { return JSON.parse(jm[1]); } catch(e) {} }
   try { return JSON.parse(txt); } catch(e) {}
   return { _raw: txt };
 }
@@ -33,14 +41,18 @@ function findInvoices(obj, out=[]) {
 }
 
 async function postRow(row) {
-  await fetch(SHEET_URL, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(row) });
+  await fetch(SHEET_URL, {
+    method:"POST",
+    headers:{"Content-Type":"text/plain;charset=utf-8"},
+    body:JSON.stringify(row)
+  });
 }
 
 async function main() {
   if (!SHEET_URL) throw new Error("Hiányzik a SHEET_URL.");
   const { dateFrom, dateTo, label } = getRange();
   const irany = DIRECTION === "OUTBOUND" ? "kiállított" : "bejövő";
-  console.log(`Lekérendő: ${label} - ${irany}`);
+  console.log(`Lekérendő: ${label} (${dateFrom} … ${dateTo}) - ${irany}`);
 
   const transport = new StdioClientTransport({ command:"node", args:["dist/cli.js"], env:process.env });
   const client = new Client({ name:"nav-sync", version:"1.0.0" }, { capabilities:{} });
@@ -60,41 +72,42 @@ async function main() {
     const data = parseRaw(res);
     const ap = data?.invoiceDigestResult?.availablePage
       ?? data?.result?.invoiceDigestResult?.availablePage ?? 1;
-    totalPages = Number(ap) || 1;
+    totalPages = Math.min(Number(ap) || 1, 50);
     findInvoices(data?.invoiceDigestResult ?? data?.result?.invoiceDigestResult ?? data, invoices);
     page++;
   } while (page <= totalPages);
 
-  console.log(`Talált: ${invoices.length}`);
+  console.log(`Összesen talált: ${invoices.length}`);
 
-  // Első számla loggolása — mezőnevek ellenőrzéséhez
-  if (invoices.length > 0) {
-    console.log("ELSŐ SZÁMLA MEZŐK:", JSON.stringify(invoices[0]));
-  }
+  // Kliens oldali dátumszűrés — csak a kért hónap számlái
+  const filtered = invoices.filter(inv => {
+    const d = inv.invoiceIssueDate || inv.issueDate || "";
+    if (!d) return true;
+    return d >= dateFrom && d <= dateTo;
+  });
+  console.log(`Dátumszűrés után: ${filtered.length}`);
 
   const pmMap = { CASH:"készpénz", TRANSFER:"átutalás", CARD:"kártya", VOUCHER:"egyéb", OTHER:"egyéb" };
   let sent = 0;
 
-  for (const inv of invoices) {
-    // Bruttó = nettó + ÁFA (a digest tartalmazza)
-    const net = Number(inv.invoiceNetAmount || inv.invoiceNetAmountHUF || 0);
-    const vat = Number(inv.invoiceVatAmount || inv.invoiceVatAmountHUF || 0);
+  for (const inv of filtered) {
+    const net   = Number(inv.invoiceNetAmount   || inv.invoiceNetAmountHUF   || 0);
+    const vat   = Number(inv.invoiceVatAmount   || inv.invoiceVatAmountHUF   || 0);
     const gross = Number(inv.invoiceGrossAmount || inv.invoiceGrossAmountHUF || 0);
     const osszeg = gross || (net + vat) || 0;
 
-    console.log(`${inv.invoiceNumber}: net=${net} vat=${vat} gross=${gross} → osszeg=${osszeg}`);
-
     await postRow({
-      datum: inv.invoiceIssueDate || inv.issueDate || "",
-      elado: DIRECTION === "OUTBOUND" ? (inv.customerName||"") : (inv.supplierName||""),
-      sorszam: inv.invoiceNumber || "",
+      datum:        inv.invoiceIssueDate || inv.issueDate || "",
+      elado:        DIRECTION === "OUTBOUND" ? (inv.customerName||"") : (inv.supplierName||""),
+      sorszam:      inv.invoiceNumber || "",
       fizetesi_mod: pmMap[inv.paymentMethod] || "",
       osszeg,
-      penznem: inv.currency || inv.currencyCode || "HUF",
-      vevo: process.env.NAV_TAX_NUMBER || "",
-      fajl: `NAV ${irany} ${label}`,
+      penznem:      inv.currency || inv.currencyCode || "HUF",
+      vevo:         process.env.NAV_TAX_NUMBER || "",
+      fajl:         `NAV ${irany} ${label}`,
     });
     sent++;
+    await new Promise(r=>setTimeout(r,100));
   }
 
   console.log(`Beküldve: ${sent} sor.`);
