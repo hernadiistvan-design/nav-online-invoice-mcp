@@ -32,15 +32,24 @@ function findInvoices(obj, out=[]) {
   return out;
 }
 
-function findAllNumbers(obj, prefix="", results={}) {
-  if (!obj || typeof obj !== "object") return results;
+const OSSZEG_MINTAK = /gross|amount|osszeg|total|brutto|netto|vat|afa|összeg/i;
+const KIZART_MINTAK = /taxnumber|adoszam|tax.*num|number.*tax|id$|index|page|version|code|count/i;
+
+function findAmount(obj, prefix="") {
+  if (!obj || typeof obj !== "object") return 0;
   for (const [k, v] of Object.entries(obj)) {
     const path = prefix ? `${prefix}.${k}` : k;
-    if (typeof v === "number" && v > 0) results[path] = v;
-    else if (typeof v === "string" && /^\d+(\.\d+)?$/.test(v) && Number(v) > 0) results[path] = Number(v);
-    else if (typeof v === "object") findAllNumbers(v, path, results);
+    if (KIZART_MINTAK.test(k)) continue;
+    if (OSSZEG_MINTAK.test(k)) {
+      const num = Number(v);
+      if (num > 0) return num;
+    }
+    if (typeof v === "object") {
+      const found = findAmount(v, path);
+      if (found > 0) return found;
+    }
   }
-  return results;
+  return 0;
 }
 
 async function postRow(row) {
@@ -58,7 +67,6 @@ async function main() {
   await client.connect(transport);
 
   const tools = await client.listTools();
-  console.log("Összes tool:", tools.tools.map(t=>t.name).join(", "));
   const digestTool = tools.tools.find(t => /digest/i.test(t.name) && /invoice/i.test(t.name));
   const dataTool = tools.tools.find(t => /data/i.test(t.name) && /invoice/i.test(t.name) && !/digest/i.test(t.name));
   console.log("Digest:", digestTool?.name, "| Data:", dataTool?.name);
@@ -77,7 +85,7 @@ async function main() {
   console.log(`Talált: ${invoices.length}`);
   const pmMap = { CASH:"készpénz", TRANSFER:"átutalás", CARD:"kártya", VOUCHER:"egyéb", OTHER:"egyéb" };
   let sent = 0;
-  let firstDataLogged = false;
+  let firstLogged = false;
 
   for (const inv of invoices) {
     const invoiceNumber = inv.invoiceNumber || "";
@@ -89,18 +97,12 @@ async function main() {
       try {
         const dres = await client.callTool({ name: dataTool.name, arguments: { invoiceNumber, invoiceDirection: DIRECTION } });
         const ddata = parseRaw(dres);
-        if (!firstDataLogged) {
-          firstDataLogged = true;
-          console.log("ÖSSZEG MEZŐK:", JSON.stringify(findAllNumbers(ddata)).slice(0, 500));
-          console.log("TELJES VÁLASZ:", JSON.stringify(ddata).slice(0, 800));
+        if (!firstLogged) {
+          firstLogged = true;
+          console.log("ELSŐ SZÁMLA VÁLASZ:", JSON.stringify(ddata).slice(0, 1000));
         }
-        const nums = findAllNumbers(ddata);
-        const values = Object.entries(nums);
-        if (values.length > 0) {
-          const grossEntry = values.find(([k]) => /gross|brutto|vegosszeg|total/i.test(k));
-          if (grossEntry) osszeg = grossEntry[1];
-          else osszeg = Math.max(...values.map(([,v]) => v));
-        }
+        osszeg = findAmount(ddata);
+        console.log(`${invoiceNumber}: összeg=${osszeg}`);
         const pm = ddata?.paymentMethod || ddata?.invoiceData?.invoiceMain?.invoice?.paymentMethod;
         if (pm) fizetesiMod = pmMap[pm] || pm;
       } catch(e) {
@@ -109,7 +111,7 @@ async function main() {
       await new Promise(r=>setTimeout(r,200));
     }
 
-    await postRow({ datum: inv.invoiceIssueDate || inv.issueDate || "", elado: DIRECTION === "OUTBOUND" ? (inv.customerName || "") : (inv.supplierName || ""), sorszam: invoiceNumber, fizetesi_mod: fizetesiMod, osszeg, penznem, vevo: process.env.NAV_TAX_NUMBER || "", fajl: `NAV ${irany} ${label}` });
+    await postRow({ datum: inv.invoiceIssueDate||inv.issueDate||"", elado: DIRECTION==="OUTBOUND"?(inv.customerName||""):(inv.supplierName||""), sorszam: invoiceNumber, fizetesi_mod: fizetesiMod, osszeg, penznem, vevo: process.env.NAV_TAX_NUMBER||"", fajl: `NAV ${irany} ${label}` });
     sent++;
   }
   console.log(`Beküldve: ${sent} sor.`);
