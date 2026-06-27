@@ -32,26 +32,6 @@ function findInvoices(obj, out=[]) {
   return out;
 }
 
-const OSSZEG_MINTAK = /gross|amount|osszeg|total|brutto|netto|vat|afa|összeg/i;
-const KIZART_MINTAK = /taxnumber|adoszam|tax.*num|number.*tax|id$|index|page|version|code|count/i;
-
-function findAmount(obj, prefix="") {
-  if (!obj || typeof obj !== "object") return 0;
-  for (const [k, v] of Object.entries(obj)) {
-    const path = prefix ? `${prefix}.${k}` : k;
-    if (KIZART_MINTAK.test(k)) continue;
-    if (OSSZEG_MINTAK.test(k)) {
-      const num = Number(v);
-      if (num > 0) return num;
-    }
-    if (typeof v === "object") {
-      const found = findAmount(v, path);
-      if (found > 0) return found;
-    }
-  }
-  return 0;
-}
-
 async function postRow(row) {
   await fetch(SHEET_URL, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(row) });
 }
@@ -68,52 +48,55 @@ async function main() {
 
   const tools = await client.listTools();
   const digestTool = tools.tools.find(t => /digest/i.test(t.name) && /invoice/i.test(t.name));
-  const dataTool = tools.tools.find(t => /data/i.test(t.name) && /invoice/i.test(t.name) && !/digest/i.test(t.name));
-  console.log("Digest:", digestTool?.name, "| Data:", dataTool?.name);
+  console.log("Digest tool:", digestTool?.name);
 
   const invoices = [];
   let page = 1, totalPages = 1;
   do {
-    const res = await client.callTool({ name: digestTool.name, arguments: { invoiceDirection: DIRECTION, dateFrom, dateTo, page } });
+    const res = await client.callTool({
+      name: digestTool.name,
+      arguments: { invoiceDirection: DIRECTION, dateFrom, dateTo, page }
+    });
     const data = parseRaw(res);
-    const ap = data?.invoiceDigestResult?.availablePage ?? data?.result?.invoiceDigestResult?.availablePage ?? 1;
+    const ap = data?.invoiceDigestResult?.availablePage
+      ?? data?.result?.invoiceDigestResult?.availablePage ?? 1;
     totalPages = Number(ap) || 1;
     findInvoices(data?.invoiceDigestResult ?? data?.result?.invoiceDigestResult ?? data, invoices);
     page++;
   } while (page <= totalPages);
 
   console.log(`Talált: ${invoices.length}`);
+
+  // Első számla loggolása — mezőnevek ellenőrzéséhez
+  if (invoices.length > 0) {
+    console.log("ELSŐ SZÁMLA MEZŐK:", JSON.stringify(invoices[0]));
+  }
+
   const pmMap = { CASH:"készpénz", TRANSFER:"átutalás", CARD:"kártya", VOUCHER:"egyéb", OTHER:"egyéb" };
   let sent = 0;
-  let firstLogged = false;
 
   for (const inv of invoices) {
-    const invoiceNumber = inv.invoiceNumber || "";
-    let osszeg = 0;
-    let fizetesiMod = pmMap[inv.paymentMethod] || "";
-    let penznem = inv.currency || inv.currencyCode || "HUF";
+    // Bruttó = nettó + ÁFA (a digest tartalmazza)
+    const net = Number(inv.invoiceNetAmount || inv.invoiceNetAmountHUF || 0);
+    const vat = Number(inv.invoiceVatAmount || inv.invoiceVatAmountHUF || 0);
+    const gross = Number(inv.invoiceGrossAmount || inv.invoiceGrossAmountHUF || 0);
+    const osszeg = gross || (net + vat) || 0;
 
-    if (dataTool && invoiceNumber) {
-      try {
-        const dres = await client.callTool({ name: dataTool.name, arguments: { invoiceNumber, invoiceDirection: DIRECTION } });
-        const ddata = parseRaw(dres);
-        if (!firstLogged) {
-          firstLogged = true;
-          console.log("ELSŐ SZÁMLA VÁLASZ:", JSON.stringify(ddata).slice(0, 1000));
-        }
-        osszeg = findAmount(ddata);
-        console.log(`${invoiceNumber}: összeg=${osszeg}`);
-        const pm = ddata?.paymentMethod || ddata?.invoiceData?.invoiceMain?.invoice?.paymentMethod;
-        if (pm) fizetesiMod = pmMap[pm] || pm;
-      } catch(e) {
-        console.log(`  Hiba (${invoiceNumber}): ${e.message}`);
-      }
-      await new Promise(r=>setTimeout(r,200));
-    }
+    console.log(`${inv.invoiceNumber}: net=${net} vat=${vat} gross=${gross} → osszeg=${osszeg}`);
 
-    await postRow({ datum: inv.invoiceIssueDate||inv.issueDate||"", elado: DIRECTION==="OUTBOUND"?(inv.customerName||""):(inv.supplierName||""), sorszam: invoiceNumber, fizetesi_mod: fizetesiMod, osszeg, penznem, vevo: process.env.NAV_TAX_NUMBER||"", fajl: `NAV ${irany} ${label}` });
+    await postRow({
+      datum: inv.invoiceIssueDate || inv.issueDate || "",
+      elado: DIRECTION === "OUTBOUND" ? (inv.customerName||"") : (inv.supplierName||""),
+      sorszam: inv.invoiceNumber || "",
+      fizetesi_mod: pmMap[inv.paymentMethod] || "",
+      osszeg,
+      penznem: inv.currency || inv.currencyCode || "HUF",
+      vevo: process.env.NAV_TAX_NUMBER || "",
+      fajl: `NAV ${irany} ${label}`,
+    });
     sent++;
   }
+
   console.log(`Beküldve: ${sent} sor.`);
   await client.close();
 }
