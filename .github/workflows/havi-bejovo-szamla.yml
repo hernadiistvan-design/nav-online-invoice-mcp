@@ -37,4 +37,4 @@ jobs:
           NAV_ENV:           production
           SHEET_URL:         ${{ secrets.SHEET_URL }}
           HONAP:             ${{ github.event.inputs.honap }}
-        run: node havi-bejovo-sync.mjs
+        run: node havi-bejovo-sync.js
