@@ -2,26 +2,27 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const SHEET_URL = process.env.SHEET_URL;
-const HONAP = (process.env.HONAP || "").trim();
-const DIRECTION = (process.env.DIRECTION || "INBOUND").trim().toUpperCase();
 
 function getRange() {
-  if (/^\d{4}-\d{2}$/.test(HONAP)) {
-    const [y,m] = HONAP.split("-").map(Number);
-    return {
-      dateFrom: `${y}-${String(m).padStart(2,'0')}-01`,
-      dateTo:   `${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}`,
-      label: HONAP
-    };
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const today = now.toISOString().slice(0, 10);
+  return { dateFrom: `${y}-01-01`, dateTo: today, label: `${y}` };
+}
+
+async function getMeglevoSorszamok() {
+  try {
+    const url = SHEET_URL + '?action=getSorszamok&tab=NAV+bejövő';
+    const resp = await fetch(url);
+    if (resp.ok) {
+      const data = await resp.json();
+      console.log(`Már meglévő számlák a Sheetben: ${data.length}`);
+      return new Set(data);
+    }
+  } catch(e) {
+    console.log('Meglévő számlák lekérése sikertelen:', e.message);
   }
-  const n = new Date();
-  let y = n.getUTCFullYear(), m = n.getUTCMonth();
-  if (m===0){m=12;y--;}
-  return {
-    dateFrom: `${y}-${String(m).padStart(2,'0')}-01`,
-    dateTo:   `${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}`,
-    label: `${y}-${String(m).padStart(2,'0')}`
-  };
+  return new Set();
 }
 
 function parseRaw(res) {
@@ -51,8 +52,9 @@ async function postRow(row) {
 async function main() {
   if (!SHEET_URL) throw new Error("Hiányzik a SHEET_URL.");
   const { dateFrom, dateTo, label } = getRange();
-  const irany = DIRECTION === "OUTBOUND" ? "kiállított" : "bejövő";
-  console.log(`Lekérendő: ${label} (${dateFrom} … ${dateTo}) - ${irany}`);
+  console.log(`Lekérendő: ${label} (${dateFrom} … ${dateTo}) - INBOUND`);
+
+  const meglevo = await getMeglevoSorszamok();
 
   const transport = new StdioClientTransport({ command:"node", args:["dist/cli.js"], env:process.env });
   const client = new Client({ name:"nav-sync", version:"1.0.0" }, { capabilities:{} });
@@ -67,30 +69,34 @@ async function main() {
   do {
     const res = await client.callTool({
       name: digestTool.name,
-      arguments: { invoiceDirection: DIRECTION, dateFrom, dateTo, page }
+      arguments: { invoiceDirection: "INBOUND", dateFrom, dateTo, page }
     });
     const data = parseRaw(res);
     const ap = data?.invoiceDigestResult?.availablePage
       ?? data?.result?.invoiceDigestResult?.availablePage ?? 1;
-    totalPages = Math.min(Number(ap) || 1, 50);
+    totalPages = Math.min(Number(ap) || 1, 100);
     findInvoices(data?.invoiceDigestResult ?? data?.result?.invoiceDigestResult ?? data, invoices);
     page++;
   } while (page <= totalPages);
 
-  console.log(`Összesen talált: ${invoices.length}`);
+  console.log(`NAV-ból összesen: ${invoices.length}`);
 
-  // Kliens oldali dátumszűrés — csak a kért hónap számlái
-  const filtered = invoices.filter(inv => {
-    const d = inv.invoiceIssueDate || inv.issueDate || "";
-    if (!d) return true;
-    return d >= dateFrom && d <= dateTo;
+  const ujak = invoices.filter(inv => {
+    const sz = (inv.invoiceNumber || "").trim();
+    return sz && !meglevo.has(sz);
   });
-  console.log(`Dátumszűrés után: ${filtered.length}`);
+
+  console.log(`Új (még nem szerepel a Sheetben): ${ujak.length}`);
+  if (ujak.length === 0) {
+    console.log("Nincs új számla — kész.");
+    await client.close();
+    return;
+  }
 
   const pmMap = { CASH:"készpénz", TRANSFER:"átutalás", CARD:"kártya", VOUCHER:"egyéb", OTHER:"egyéb" };
   let sent = 0;
 
-  for (const inv of filtered) {
+  for (const inv of ujak) {
     const net   = Number(inv.invoiceNetAmount   || inv.invoiceNetAmountHUF   || 0);
     const vat   = Number(inv.invoiceVatAmount   || inv.invoiceVatAmountHUF   || 0);
     const gross = Number(inv.invoiceGrossAmount || inv.invoiceGrossAmountHUF || 0);
@@ -98,19 +104,19 @@ async function main() {
 
     await postRow({
       datum:        inv.invoiceIssueDate || inv.issueDate || "",
-      elado:        DIRECTION === "OUTBOUND" ? (inv.customerName||"") : (inv.supplierName||""),
+      elado:        inv.supplierName || "",
       sorszam:      inv.invoiceNumber || "",
       fizetesi_mod: pmMap[inv.paymentMethod] || "",
       osszeg,
       penznem:      inv.currency || inv.currencyCode || "HUF",
       vevo:         process.env.NAV_TAX_NUMBER || "",
-      fajl:         `NAV ${irany} ${label}`,
+      fajl:         `NAV bejövő ${label}`,
     });
     sent++;
-    await new Promise(r=>setTimeout(r,100));
+    await new Promise(r=>setTimeout(r,150));
   }
 
-  console.log(`Beküldve: ${sent} sor.`);
+  console.log(`Beküldve: ${sent} új sor.`);
   await client.close();
 }
 main().catch(err => { console.error("HIBA:", err); process.exit(1); });
