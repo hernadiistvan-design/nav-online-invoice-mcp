@@ -4,112 +4,94 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const SHEET_URL = process.env.SHEET_URL;
 const HONAP = (process.env.HONAP || "").trim();
 
-function getMonths() {
-  if (/^\d{4}$/.test(HONAP)) {
-    const y = parseInt(HONAP);
-    return Array.from({length:12},(_,i)=>({
-      from:`${y}-${String(i+1).padStart(2,'0')}-01T00:00:00Z`,
-      to:`${y}-${String(i+1).padStart(2,'0')}-${new Date(y,i+1,0).getDate()}T23:59:59Z`,
-      label:`${y}-${String(i+1).padStart(2,'0')}`
-    }));
-  }
+function getRange() {
   if (/^\d{4}-\d{2}$/.test(HONAP)) {
     const [y,m] = HONAP.split("-").map(Number);
-    return [{
-      from:`${y}-${String(m).padStart(2,'0')}-01T00:00:00Z`,
-      to:`${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}T23:59:59Z`,
-      label:HONAP
-    }];
+    return { dateFrom:`${y}-${String(m).padStart(2,'0')}-01`, dateTo:`${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}`, label:HONAP };
   }
   const n = new Date();
   let y = n.getUTCFullYear(), m = n.getUTCMonth();
   if(m===0){m=12;y--;}
-  return [{
-    from:`${y}-${String(m).padStart(2,'0')}-01T00:00:00Z`,
-    to:`${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}T23:59:59Z`,
-    label:`${y}-${String(m).padStart(2,'0')}`
-  }];
+  return { dateFrom:`${y}-${String(m).padStart(2,'0')}-01`, dateTo:`${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}`, label:`${y}-${String(m).padStart(2,'0')}` };
 }
 
-function pick(obj,names){
-  if(!obj||typeof obj!=="object") return undefined;
-  for(const k of Object.keys(obj)) if(names.includes(k)) return obj[k];
-  for(const k of Object.keys(obj)){const r=pick(obj[k],names);if(r!==undefined)return r;}
-  return undefined;
-}
-function collectInvoices(node,out=[]){
-  if(!node||typeof node!=="object") return out;
-  if(node.invoiceNumber!==undefined&&!Array.isArray(node)) out.push(node);
-  for(const k of Object.keys(node)){
-    const v=node[k];
-    if(Array.isArray(v)) v.forEach(it=>collectInvoices(it,out));
-    else if(typeof v==="object") collectInvoices(v,out);
+function parseRaw(res) {
+  const txt = (res?.content||[]).filter(c=>c.type==="text").map(c=>c.text).join("\n").trim();
+  // JSON blokk kinyerése a markdown szövegből
+  const jsonMatch = txt.match(/```json\n([\s\S]*?)\n```/);
+  if (jsonMatch) {
+    try { return JSON.parse(jsonMatch[1]); } catch(e) {}
   }
+  try { return JSON.parse(txt); } catch(e) {}
+  return { _raw: txt };
+}
+
+function findInvoices(obj, out=[]) {
+  if (!obj || typeof obj !== "object") return out;
+  if (Array.isArray(obj)) { obj.forEach(i => findInvoices(i, out)); return out; }
+  if (obj.invoiceNumber !== undefined) { out.push(obj); return out; }
+  for (const v of Object.values(obj)) findInvoices(v, out);
   return out;
 }
-function parseToolResult(res){
-  const txt=(res?.content||[]).filter(c=>c.type==="text").map(c=>c.text).join("\n").trim();
-  if(!txt) return res?.structuredContent??{};
-  try{return JSON.parse(txt);}catch{return{_raw:txt};}
-}
-async function postRow(row){
-  await fetch(SHEET_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(row)});
+
+async function postRow(row) {
+  await fetch(SHEET_URL, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(row) });
 }
 
-async function main(){
-  if(!SHEET_URL) throw new Error("Hiányzik a SHEET_URL.");
-  const months = getMonths();
-  console.log(`Lekérendő időszakok: ${months.map(m=>m.label).join(", ")}`);
+async function main() {
+  if (!SHEET_URL) throw new Error("Hiányzik a SHEET_URL.");
+  const { dateFrom, dateTo, label } = getRange();
+  console.log(`Lekérendő: ${label} (${dateFrom} … ${dateTo})`);
 
-  const transport = new StdioClientTransport({command:"node",args:["dist/cli.js"],env:process.env});
-  const client = new Client({name:"havi-bejovo-sync",version:"1.0.0"},{capabilities:{}});
+  const transport = new StdioClientTransport({ command:"node", args:["dist/cli.js"], env:process.env });
+  const client = new Client({ name:"nav-sync", version:"1.0.0" }, { capabilities:{} });
   await client.connect(transport);
 
   const tools = await client.listTools();
-  const digestTool = tools.tools.find(t=>/digest/i.test(t.name)&&/invoice/i.test(t.name));
+  const digestTool = tools.tools.find(t => /digest/i.test(t.name) && /invoice/i.test(t.name));
+  console.log("Digest tool:", digestTool.name);
 
-  let totalSent = 0;
-  for(const {from,to,label} of months){
-    console.log(`\n--- ${label} ---`);
-    const invoices=[];
-    let page=1,totalPages=1;
-    do{
-      const res = await client.callTool({
-        name:digestTool.name,
-        arguments:{
-          invoiceDirection:"INBOUND",
-          insDateTimeFrom:from,
-          insDateTimeTo:to,
-          page
-        }
-      });
-      const data = parseToolResult(res);
-      console.log(`oldal ${page} válasz:`, JSON.stringify(data).slice(0,200));
-      const ap = pick(data,["availablePage","availablePages"]);
-      totalPages = Number(ap)||1;
-      collectInvoices(data,invoices);
-      page++;
-    }while(page<=totalPages);
+  const invoices = [];
+  let page = 1, totalPages = 1;
+  do {
+    const res = await client.callTool({
+      name: digestTool.name,
+      arguments: { invoiceDirection:"INBOUND", dateFrom, dateTo, page }
+    });
+    const data = parseRaw(res);
+    console.log(`Oldal ${page} kulcsok:`, Object.keys(data).join(", "));
+    
+    // availablePage keresése
+    const ap = data?.invoiceDigestResult?.availablePage ?? data?.availablePage ?? data?.result?.invoiceDigestResult?.availablePage ?? 1;
+    totalPages = Number(ap) || 1;
+    console.log(`Oldalak: ${totalPages}`);
+    
+    // Számlák keresése
+    const digestResult = data?.invoiceDigestResult ?? data?.result?.invoiceDigestResult ?? data;
+    console.log(`digestResult kulcsok:`, JSON.stringify(digestResult).slice(0, 300));
+    findInvoices(digestResult, invoices);
+    page++;
+  } while (page <= totalPages);
 
-    console.log(`Talált: ${invoices.length}`);
-    const pmMap={CASH:"készpénz",TRANSFER:"átutalás",CARD:"kártya",VOUCHER:"egyéb",OTHER:"egyéb"};
-    for(const inv of invoices){
-      const row={
-        datum:pick(inv,["invoiceIssueDate","issueDate"])||"",
-        elado:pick(inv,["supplierName"])||"",
-        sorszam:pick(inv,["invoiceNumber"])||"",
-        fizetesi_mod:pmMap[pick(inv,["paymentMethod"])]||"",
-        osszeg:Number(pick(inv,["invoiceGrossAmount"]))||0,
-        penznem:pick(inv,["currency","currencyCode"])||"HUF",
-        vevo:process.env.NAV_TAX_NUMBER||"",
-        fajl:`NAV bejövő ${label}`,
-      };
-      await postRow(row);
-      totalSent++;
-    }
-    await new Promise(r=>setTimeout(r,300));
+  console.log(`Talált számla: ${invoices.length}`);
+  if (invoices.length > 0) console.log("Első számla:", JSON.stringify(invoices[0]).slice(0, 200));
+
+  const pmMap = { CASH:"készpénz", TRANSFER:"átutalás", CARD:"kártya", VOUCHER:"egyéb", OTHER:"egyéb" };
+  let sent = 0;
+  for (const inv of invoices) {
+    await postRow({
+      datum: inv.invoiceIssueDate || inv.issueDate || "",
+      elado: inv.supplierName || "",
+      sorszam: inv.invoiceNumber || "",
+      fizetesi_mod: pmMap[inv.paymentMethod] || "",
+      osszeg: Number(inv.invoiceGrossAmount) || 0,
+      penznem: inv.currency || inv.currencyCode || "HUF",
+      vevo: process.env.NAV_TAX_NUMBER || "",
+      fajl: `NAV bejövő ${label}`,
+    });
+    sent++;
   }
-  console.log(`\nÖsszesen beküldve: ${totalSent} sor.`);
+  console.log(`Beküldve: ${sent} sor.`);
   await client.close();
 }
-main().catch(err=>{console.error("HIBA:",err);process.exit(1);});
+main().catch(err => { console.error("HIBA:", err); process.exit(1); });
