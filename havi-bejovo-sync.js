@@ -32,6 +32,18 @@ function findInvoices(obj, out=[]) {
   return out;
 }
 
+function deepFind(obj, keys) {
+  if (!obj || typeof obj !== "object") return undefined;
+  for (const k of Object.keys(obj)) {
+    if (keys.includes(k) && obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
+  }
+  for (const v of Object.values(obj)) {
+    const r = deepFind(v, keys);
+    if (r !== undefined) return r;
+  }
+  return undefined;
+}
+
 async function postRow(row) {
   await fetch(SHEET_URL, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(row) });
 }
@@ -48,6 +60,7 @@ async function main() {
 
   const tools = await client.listTools();
   const digestTool = tools.tools.find(t => /digest/i.test(t.name) && /invoice/i.test(t.name));
+  const dataTool = tools.tools.find(t => /invoice_data|invoiceData|invoice-data/i.test(t.name));
 
   const invoices = [];
   let page = 1, totalPages = 1;
@@ -57,7 +70,6 @@ async function main() {
       arguments: { invoiceDirection: DIRECTION, dateFrom, dateTo, page }
     });
     const data = parseRaw(res);
-    console.log(`Oldal ${page}:`, JSON.stringify(data).slice(0,200));
     const ap = data?.invoiceDigestResult?.availablePage ?? data?.result?.invoiceDigestResult?.availablePage ?? 1;
     totalPages = Number(ap) || 1;
     findInvoices(data?.invoiceDigestResult ?? data?.result?.invoiceDigestResult ?? data, invoices);
@@ -67,20 +79,45 @@ async function main() {
   console.log(`Talált ${irany} számla: ${invoices.length}`);
   const pmMap = { CASH:"készpénz", TRANSFER:"átutalás", CARD:"kártya", VOUCHER:"egyéb", OTHER:"egyéb" };
   let sent = 0;
+
   for (const inv of invoices) {
+    const invoiceNumber = inv.invoiceNumber || "";
+    let osszeg = Number(inv.invoiceGrossAmount) || 0;
+    let fizetesiMod = pmMap[inv.paymentMethod] || "";
+    let penznem = inv.currency || inv.currencyCode || "HUF";
+
+    if (dataTool && invoiceNumber) {
+      try {
+        const dres = await client.callTool({
+          name: dataTool.name,
+          arguments: { invoiceNumber, invoiceDirection: DIRECTION }
+        });
+        const ddata = parseRaw(dres);
+        const gross = deepFind(ddata, ["invoiceGrossAmount","invoiceGrossAmountNormalized","grossAmount"]);
+        if (gross) osszeg = Number(gross);
+        const pm = deepFind(ddata, ["paymentMethod"]);
+        if (pm) fizetesiMod = pmMap[pm] || pm;
+        const cur = deepFind(ddata, ["currencyCode","currency"]);
+        if (cur) penznem = cur;
+      } catch(e) {
+        console.log(`  Részletes adat hiba (${invoiceNumber}): ${e.message}`);
+      }
+      await new Promise(r=>setTimeout(r,200));
+    }
+
     await postRow({
       datum: inv.invoiceIssueDate || inv.issueDate || "",
       elado: DIRECTION === "OUTBOUND" ? (inv.customerName || "") : (inv.supplierName || ""),
-      sorszam: inv.invoiceNumber || "",
-      fizetesi_mod: pmMap[inv.paymentMethod] || "",
-      osszeg: Number(inv.invoiceGrossAmount) || 0,
-      penznem: inv.currency || inv.currencyCode || "HUF",
+      sorszam: invoiceNumber,
+      fizetesi_mod: fizetesiMod,
+      osszeg,
+      penznem,
       vevo: process.env.NAV_TAX_NUMBER || "",
       fajl: `NAV ${irany} ${label}`,
     });
     sent++;
-    await new Promise(r=>setTimeout(r,100));
   }
+
   console.log(`Beküldve: ${sent} sor.`);
   await client.close();
 }
