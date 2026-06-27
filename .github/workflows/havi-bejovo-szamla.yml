@@ -9,24 +9,20 @@ on:
         description: 'Melyik hónap? (üresen = előző hónap; pl. 2026-05)'
         required: false
         default: ''
+      direction:
+        description: 'Irány: INBOUND (bejövő) vagy OUTBOUND (kiállított)'
+        required: false
+        default: 'INBOUND'
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Repo letöltése
-        uses: actions/checkout@v4
-
-      - name: Node beállítása
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Függőségek és build
-        run: |
-          npm ci
-          npm run build
-
+      - run: npm ci && npm run build
       - name: Bejövő számlák lekérése
         env:
           NAV_LOGIN:         ${{ secrets.NAV_LOGIN }}
@@ -37,4 +33,5 @@ jobs:
           NAV_ENV:           production
           SHEET_URL:         ${{ secrets.SHEET_URL }}
           HONAP:             ${{ github.event.inputs.honap }}
+          DIRECTION:         ${{ github.event.inputs.direction || 'INBOUND' }}
         run: node havi-bejovo-sync.js
