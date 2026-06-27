@@ -8,16 +8,16 @@ function getMonths() {
   if (/^\d{4}$/.test(HONAP)) {
     const y = parseInt(HONAP);
     return Array.from({length:12},(_,i)=>({
-      dateFrom:`${y}-${String(i+1).padStart(2,'0')}-01`,
-      dateTo:new Date(y,i+1,0).toISOString().slice(0,10),
+      from:`${y}-${String(i+1).padStart(2,'0')}-01T00:00:00Z`,
+      to:`${y}-${String(i+1).padStart(2,'0')}-${new Date(y,i+1,0).getDate()}T23:59:59Z`,
       label:`${y}-${String(i+1).padStart(2,'0')}`
     }));
   }
   if (/^\d{4}-\d{2}$/.test(HONAP)) {
     const [y,m] = HONAP.split("-").map(Number);
     return [{
-      dateFrom:`${y}-${String(m).padStart(2,'0')}-01`,
-      dateTo:new Date(y,m,0).toISOString().slice(0,10),
+      from:`${y}-${String(m).padStart(2,'0')}-01T00:00:00Z`,
+      to:`${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}T23:59:59Z`,
       label:HONAP
     }];
   }
@@ -25,8 +25,8 @@ function getMonths() {
   let y = n.getUTCFullYear(), m = n.getUTCMonth();
   if(m===0){m=12;y--;}
   return [{
-    dateFrom:`${y}-${String(m).padStart(2,'0')}-01`,
-    dateTo:new Date(y,m,0).toISOString().slice(0,10),
+    from:`${y}-${String(m).padStart(2,'0')}-01T00:00:00Z`,
+    to:`${y}-${String(m).padStart(2,'0')}-${new Date(y,m,0).getDate()}T23:59:59Z`,
     label:`${y}-${String(m).padStart(2,'0')}`
   }];
 }
@@ -69,20 +69,29 @@ async function main(){
   const digestTool = tools.tools.find(t=>/digest/i.test(t.name)&&/invoice/i.test(t.name));
 
   let totalSent = 0;
-  for(const {dateFrom,dateTo,label} of months){
-    console.log(`\n--- ${label} (${dateFrom} … ${dateTo}) ---`);
+  for(const {from,to,label} of months){
+    console.log(`\n--- ${label} ---`);
     const invoices=[];
     let page=1,totalPages=1;
     do{
-      const res = await client.callTool({name:digestTool.name,arguments:{invoiceDirection:"INBOUND",dateFrom,dateTo,page}});
+      const res = await client.callTool({
+        name:digestTool.name,
+        arguments:{
+          invoiceDirection:"INBOUND",
+          insDateTimeFrom:from,
+          insDateTimeTo:to,
+          page
+        }
+      });
       const data = parseToolResult(res);
+      console.log(`oldal ${page} válasz:`, JSON.stringify(data).slice(0,200));
       const ap = pick(data,["availablePage","availablePages"]);
       totalPages = Number(ap)||1;
       collectInvoices(data,invoices);
       page++;
     }while(page<=totalPages);
 
-    console.log(`Talált bejövő számla: ${invoices.length}`);
+    console.log(`Talált: ${invoices.length}`);
     const pmMap={CASH:"készpénz",TRANSFER:"átutalás",CARD:"kártya",VOUCHER:"egyéb",OTHER:"egyéb"};
     for(const inv of invoices){
       const row={
@@ -104,4 +113,3 @@ async function main(){
   await client.close();
 }
 main().catch(err=>{console.error("HIBA:",err);process.exit(1);});
-
