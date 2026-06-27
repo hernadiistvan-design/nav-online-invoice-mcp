@@ -3,6 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const SHEET_URL = process.env.SHEET_URL;
 const HONAP = (process.env.HONAP || "").trim();
+const DIRECTION = (process.env.DIRECTION || "INBOUND").trim().toUpperCase();
 
 function getRange() {
   if (/^\d{4}-\d{2}$/.test(HONAP)) {
@@ -17,11 +18,8 @@ function getRange() {
 
 function parseRaw(res) {
   const txt = (res?.content||[]).filter(c=>c.type==="text").map(c=>c.text).join("\n").trim();
-  // JSON blokk kinyerése a markdown szövegből
   const jsonMatch = txt.match(/```json\n([\s\S]*?)\n```/);
-  if (jsonMatch) {
-    try { return JSON.parse(jsonMatch[1]); } catch(e) {}
-  }
+  if (jsonMatch) { try { return JSON.parse(jsonMatch[1]); } catch(e) {} }
   try { return JSON.parse(txt); } catch(e) {}
   return { _raw: txt };
 }
@@ -41,7 +39,8 @@ async function postRow(row) {
 async function main() {
   if (!SHEET_URL) throw new Error("Hiányzik a SHEET_URL.");
   const { dateFrom, dateTo, label } = getRange();
-  console.log(`Lekérendő: ${label} (${dateFrom} … ${dateTo})`);
+  const irany = DIRECTION === "OUTBOUND" ? "kiállított" : "bejövő";
+  console.log(`Lekérendő: ${label} (${dateFrom} … ${dateTo}) - ${irany}`);
 
   const transport = new StdioClientTransport({ command:"node", args:["dist/cli.js"], env:process.env });
   const client = new Client({ name:"nav-sync", version:"1.0.0" }, { capabilities:{} });
@@ -49,47 +48,38 @@ async function main() {
 
   const tools = await client.listTools();
   const digestTool = tools.tools.find(t => /digest/i.test(t.name) && /invoice/i.test(t.name));
-  console.log("Digest tool:", digestTool.name);
 
   const invoices = [];
   let page = 1, totalPages = 1;
   do {
     const res = await client.callTool({
       name: digestTool.name,
-      arguments: { invoiceDirection:"INBOUND", dateFrom, dateTo, page }
+      arguments: { invoiceDirection: DIRECTION, dateFrom, dateTo, page }
     });
     const data = parseRaw(res);
-    console.log(`Oldal ${page} kulcsok:`, Object.keys(data).join(", "));
-    
-    // availablePage keresése
-    const ap = data?.invoiceDigestResult?.availablePage ?? data?.availablePage ?? data?.result?.invoiceDigestResult?.availablePage ?? 1;
+    console.log(`Oldal ${page}:`, JSON.stringify(data).slice(0,200));
+    const ap = data?.invoiceDigestResult?.availablePage ?? data?.result?.invoiceDigestResult?.availablePage ?? 1;
     totalPages = Number(ap) || 1;
-    console.log(`Oldalak: ${totalPages}`);
-    
-    // Számlák keresése
-    const digestResult = data?.invoiceDigestResult ?? data?.result?.invoiceDigestResult ?? data;
-    console.log(`digestResult kulcsok:`, JSON.stringify(digestResult).slice(0, 300));
-    findInvoices(digestResult, invoices);
+    findInvoices(data?.invoiceDigestResult ?? data?.result?.invoiceDigestResult ?? data, invoices);
     page++;
   } while (page <= totalPages);
 
-  console.log(`Talált számla: ${invoices.length}`);
-  if (invoices.length > 0) console.log("Első számla:", JSON.stringify(invoices[0]).slice(0, 200));
-
+  console.log(`Talált ${irany} számla: ${invoices.length}`);
   const pmMap = { CASH:"készpénz", TRANSFER:"átutalás", CARD:"kártya", VOUCHER:"egyéb", OTHER:"egyéb" };
   let sent = 0;
   for (const inv of invoices) {
     await postRow({
       datum: inv.invoiceIssueDate || inv.issueDate || "",
-      elado: inv.supplierName || "",
+      elado: DIRECTION === "OUTBOUND" ? (inv.customerName || "") : (inv.supplierName || ""),
       sorszam: inv.invoiceNumber || "",
       fizetesi_mod: pmMap[inv.paymentMethod] || "",
       osszeg: Number(inv.invoiceGrossAmount) || 0,
       penznem: inv.currency || inv.currencyCode || "HUF",
       vevo: process.env.NAV_TAX_NUMBER || "",
-      fajl: `NAV bejövő ${label}`,
+      fajl: `NAV ${irany} ${label}`,
     });
     sent++;
+    await new Promise(r=>setTimeout(r,100));
   }
   console.log(`Beküldve: ${sent} sor.`);
   await client.close();
