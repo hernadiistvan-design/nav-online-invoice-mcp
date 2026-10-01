@@ -2,6 +2,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const SHEET_URL = process.env.SHEET_URL;
+// Webhook védelmi kulcs — a Sheet (Apps Script) csak ezzel válaszol. GitHub Secret: SHEET_TOKEN
+const SHEET_TOKEN = process.env.SHEET_TOKEN || "";
 
 function getMonths() {
   const now = new Date();
@@ -28,7 +30,7 @@ function norm(s) {
 // újraküldését = tömeges duplikációt okozná), hanem hibával leállunk.
 // Egyetlen kivétel: ALLOW_EMPTY_SHEET=1 env (tudatos első futás, üres fülre).
 async function getMeglevoSorszamok() {
-  const url = SHEET_URL + '?action=getSorszamok&tab=NAV+bej%C3%B6v%C5%91';
+  const url = SHEET_URL + '?action=getSorszamok&tab=NAV+bej%C3%B6v%C5%91&token=' + encodeURIComponent(SHEET_TOKEN);
   let data;
   try {
     const resp = await fetch(url, { redirect: "follow" });
@@ -36,6 +38,7 @@ async function getMeglevoSorszamok() {
     const text = await resp.text();
     try { data = JSON.parse(text); }
     catch { throw new Error("A válasz nem JSON (bejelentkező oldal / rossz URL?): " + text.slice(0, 120)); }
+    if (data && data.error === "unauthorized") throw new Error("A Sheet elutasította (unauthorized) — hiányzik vagy rossz a SHEET_TOKEN secret.");
     if (!Array.isArray(data)) throw new Error("A válasz nem tömb: " + JSON.stringify(data).slice(0, 120));
   } catch (e) {
     if (process.env.ALLOW_EMPTY_SHEET === "1") {
@@ -70,13 +73,14 @@ async function postRow(row) {
   const resp = await fetch(SHEET_URL, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify(row)
+    body: JSON.stringify({ ...row, token: SHEET_TOKEN })
   });
-  try {
-    const j = await resp.json();
-    if (j && j.duplikalt) return "dup";
-    if (j && j.ok === false) { console.warn("Szerver hiba:", j.error); return "err"; }
-  } catch {}
+  let j = null;
+  try { j = await resp.json(); } catch {}
+  // Rossz/hiányzó token → azonnal leállunk (nem csendben "ok"-ozunk tovább)
+  if (j && j.error === "unauthorized") throw new Error("A Sheet elutasította (unauthorized) — hiányzik vagy rossz a SHEET_TOKEN secret.");
+  if (j && j.duplikalt) return "dup";
+  if (j && j.ok === false) { console.warn("Szerver hiba:", j.error); return "err"; }
   return "ok";
 }
 
@@ -153,3 +157,4 @@ async function main() {
   await client.close();
 }
 main().catch(err => { console.error("HIBA:", err); process.exit(1); });
+éüéééééüéééáá
