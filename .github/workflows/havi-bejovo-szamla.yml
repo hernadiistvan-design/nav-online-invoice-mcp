@@ -23,4 +23,5 @@ jobs:
           NAV_EXCHANGE_KEY:  ${{ secrets.NAV_EXCHANGE_KEY }}
           NAV_ENV:           production
           SHEET_URL:         ${{ secrets.SHEET_URL }}
+          SHEET_TOKEN:       ${{ secrets.SHEET_TOKEN }}
         run: node havi-bejovo-sync.js
