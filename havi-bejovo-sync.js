@@ -157,4 +157,3 @@ async function main() {
   await client.close();
 }
 main().catch(err => { console.error("HIBA:", err); process.exit(1); });
-éüéééééüéééáá
