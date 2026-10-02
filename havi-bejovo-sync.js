@@ -3,7 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const SHEET_URL = process.env.SHEET_URL;
 // Webhook védelmi kulcs — a Sheet (Apps Script) csak ezzel válaszol. GitHub Secret: SHEET_TOKEN
-const SHEET_TOKEN = process.env.SHEET_TOKEN || "";
+const SHEET_TOKEN = (process.env.SHEET_TOKEN || "").trim();
 
 function getMonths() {
   const now = new Date();
